@@ -356,6 +356,9 @@ if ($page == 'domains' || $page == 'overview') {
 					'0',
 					''
 				));
+				if ($registration_date == '0000-00-00') {
+					$registration_date = null;
+				}
 
 				$termination_date = trim($_POST['termination_date']);
 				$termination_date = validate($termination_date, 'termination_date', '/^(19|20)\d\d[-](0[1-9]|1[012])[-](0[1-9]|[12][0-9]|3[01])$/', '', array(
@@ -363,6 +366,9 @@ if ($page == 'domains' || $page == 'overview') {
 					'0',
 					''
 				));
+				if ($termination_date == '0000-00-00') {
+					$termination_date = null;
+				}
 
 				if ($userinfo['change_serversettings'] == '1') {
 
@@ -1176,12 +1182,18 @@ elseif (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
 					'0',
 					''
 				));
+				if ($registration_date == '0000-00-00') {
+					$registration_date = null;
+				}
 				$termination_date = trim($_POST['termination_date']);
 				$termination_date = validate($termination_date, 'termination_date', '/^(19|20)\d\d[-](0[1-9]|1[012])[-](0[1-9]|[12][0-9]|3[01])$/', '', array(
 					'0000-00-00',
 					'0',
 					''
 				));
+				if ($termination_date == '0000-00-00') {
+					$termination_date = null;
+				}
 
 				$isemaildomain = 0;
 				if (isset($_POST['isemaildomain'])) {
