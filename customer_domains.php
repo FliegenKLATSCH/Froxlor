@@ -20,6 +20,11 @@
 define('AREA', 'customer');
 require './lib/init.php';
 
+// redirect if this customer page is hidden via settings
+if (Settings::IsInList('panel.customer_hide_options','domains')) {
+	redirectTo('customer_index.php');
+}
+
 if (isset($_POST['id'])) {
 	$id = intval($_POST['id']);
 } elseif (isset($_GET['id'])) {
@@ -36,7 +41,7 @@ if ($page == 'overview') {
 			'd.domain' => $lng['domains']['domainname']
 		);
 		$paging = new paging($userinfo, TABLE_PANEL_DOMAINS, $fields);
-		$domains_stmt = Database::prepare("SELECT `d`.`id`, `d`.`customerid`, `d`.`domain`, `d`.`documentroot`, `d`.`isemaildomain`, `d`.`caneditdomain`, `d`.`iswildcarddomain`, `d`.`parentdomainid`, `d`.`letsencrypt`, `d`.`termination_date`, `ad`.`id` AS `aliasdomainid`, `ad`.`domain` AS `aliasdomain`, `da`.`id` AS `domainaliasid`, `da`.`domain` AS `domainalias` FROM `" . TABLE_PANEL_DOMAINS . "` `d`
+		$domains_stmt = Database::prepare("SELECT `d`.`id`, `d`.`customerid`, `d`.`domain`, `d`.`documentroot`, `d`.`isbinddomain`, `d`.`isemaildomain`, `d`.`caneditdomain`, `d`.`iswildcarddomain`, `d`.`parentdomainid`, `d`.`letsencrypt`, `d`.`termination_date`, `ad`.`id` AS `aliasdomainid`, `ad`.`domain` AS `aliasdomain`, `da`.`id` AS `domainaliasid`, `da`.`domain` AS `domainalias` FROM `" . TABLE_PANEL_DOMAINS . "` `d`
 			LEFT JOIN `" . TABLE_PANEL_DOMAINS . "` `ad` ON `d`.`aliasdomain`=`ad`.`id`
 			LEFT JOIN `" . TABLE_PANEL_DOMAINS . "` `da` ON `da`.`aliasdomain`=`d`.`id`
 			WHERE `d`.`customerid`= :customerid
@@ -171,7 +176,7 @@ if ($page == 'overview') {
 
 		eval("echo \"" . getTemplate("domains/domainlist") . "\";");
 	} elseif ($action == 'delete' && $id != 0) {
-		$stmt = Database::prepare("SELECT `id`, `customerid`, `domain`, `documentroot`, `isemaildomain`, `parentdomainid` FROM `" . TABLE_PANEL_DOMAINS . "`
+		$stmt = Database::prepare("SELECT `id`, `customerid`, `domain`, `documentroot`, `isemaildomain`, `parentdomainid`, `aliasdomain` FROM `" . TABLE_PANEL_DOMAINS . "`
 			WHERE `customerid` = :customerid
 			AND `id` = :id"
 		);
@@ -196,6 +201,8 @@ if ($page == 'overview') {
 						standard_error('domains_cantdeletedomainwithemail');
 					}
 				}
+
+				triggerLetsEncryptCSRForAliasDestinationDomain($result['aliasdomain'], $log);
 
 				$log->logAction(USR_ACTION, LOG_INFO, "deleted subdomain '" . $idna_convert->decode($result['domain']) . "'");
 				$stmt = Database::prepare("DELETE FROM `" . TABLE_PANEL_DOMAINS . "` WHERE
@@ -230,6 +237,13 @@ if ($page == 'overview') {
 				);
 				Database::pexecute($del_stmt, array('domainid' => $id));
 
+				// remove possible existing DNS entries
+				$del_stmt = Database::prepare("
+					DELETE FROM `" . TABLE_DOMAIN_DNS . "`
+					WHERE `domain_id` = :domainid
+				");
+				Database::pexecute($del_stmt, array('domainid' => $id));
+
 				inserttask('1');
 
 				// Using nameserver, insert a task which rebuilds the server config
@@ -245,8 +259,13 @@ if ($page == 'overview') {
 	} elseif ($action == 'add') {
 		if ($userinfo['subdomains_used'] < $userinfo['subdomains'] || $userinfo['subdomains'] == '-1') {
 			if (isset($_POST['send']) && $_POST['send'] == 'send') {
+
+				if (strpos($_POST['subdomain'], '--') !== false) {
+					standard_error('domain_nopunycode');
+				}
+
 				$subdomain = $idna_convert->encode(preg_replace(array('/\:(\d)+$/', '/^https?\:\/\//'), '', validate($_POST['subdomain'], 'subdomain', '', 'subdomainiswrong')));
-				$domain = $idna_convert->encode($_POST['domain']);
+				$domain = $_POST['domain'];
 				$domain_stmt = Database::prepare("SELECT * FROM `" . TABLE_PANEL_DOMAINS . "`
 					WHERE `domain` = :domain
 					AND `customerid` = :customerid
@@ -290,16 +309,17 @@ if ($page == 'overview') {
 						ORDER BY `d`.`domain` ASC;"
 					);
 					$aliasdomain_check = Database::pexecute_first($aliasdomain_stmt, array("id" => $aliasdomain, "customerid" => $userinfo['customerid']));
+					triggerLetsEncryptCSRForAliasDestinationDomain($aliasdomain, $log);
 				}
 
-				if (isset($_POST['url']) && $_POST['url'] != '' && validateUrl($idna_convert->encode($_POST['url']))) {
+				if (isset($_POST['url']) && $_POST['url'] != '' && validateUrl($_POST['url'])) {
 					$path = $_POST['url'];
 					$_doredirect = true;
 				} else {
 					$path = validate($_POST['path'], 'path');
 				}
 
-				if (!preg_match('/^https?\:\/\//', $path) || !validateUrl($idna_convert->encode($path))) {
+				if (!preg_match('/^https?\:\/\//', $path) || !validateUrl($path)) {
 					// If path is empty or '/' and 'Use domain name as default value for DocumentRoot path' is enabled in settings,
 					// set default path to subdomain or domain name
 					if ((($path == '') || ($path == '/')) && Settings::Get('system.documentroot_use_default_value') == 1) {
@@ -340,11 +360,6 @@ if ($page == 'overview') {
 					} else {
 						standard_error('letsencryptonlypossiblewithsslipport');
 					}
-				}
-
-				if ($aliasdomain != 0 && $letsencrypt != 0)
-				{
-					standard_error('letsencryptdoesnotworkwithaliasdomains');
 				}
 
 				// Temporarily deactivate ssl_redirect until Let's Encrypt certificate was generated
@@ -505,7 +520,7 @@ if ($page == 'overview') {
 		}
 	} elseif ($action == 'edit' && $id != 0) {
 
-		$stmt = Database::prepare("SELECT `d`.`id`, `d`.`customerid`, `d`.`domain`, `d`.`documentroot`, `d`.`isemaildomain`, `d`.`wwwserveralias`, `d`.`iswildcarddomain`,
+		$stmt = Database::prepare("SELECT `d`.`id`, `d`.`customerid`, `d`.`domain`, `d`.`documentroot`, `d`.`isemaildomain`, `d`.`isbinddomain`, `d`.`wwwserveralias`, `d`.`iswildcarddomain`,
 			`d`.`parentdomainid`, `d`.`ssl_redirect`, `d`.`aliasdomain`, `d`.`openbasedir`, `d`.`openbasedir_path`, `d`.`letsencrypt`, `pd`.`subcanemaildomain`
 			FROM `" . TABLE_PANEL_DOMAINS . "` `d`, `" . TABLE_PANEL_DOMAINS . "` `pd`
 			WHERE `d`.`customerid` = :customerid
@@ -524,14 +539,14 @@ if ($page == 'overview') {
 
 		if (isset($result['customerid']) && $result['customerid'] == $userinfo['customerid']) {
 			if (isset($_POST['send']) && $_POST['send'] == 'send') {
-				if (isset($_POST['url']) && $_POST['url'] != '' && validateUrl($idna_convert->encode($_POST['url']))) {
+				if (isset($_POST['url']) && $_POST['url'] != '' && validateUrl($_POST['url'])) {
 					$path = $_POST['url'];
 					$_doredirect = true;
 				} else {
 					$path = validate($_POST['path'], 'path');
 				}
 
-				if (!preg_match('/^https?\:\/\//', $path) || !validateUrl($idna_convert->encode($path))) {
+				if (!preg_match('/^https?\:\/\//', $path) || !validateUrl($path)) {
 					// If path is empty or '/' and 'Use domain name as default value for DocumentRoot path' is enabled in settings,
 					// set default path to subdomain or domain name
 					if ((($path == '') || ($path == '/')) && Settings::Get('system.documentroot_use_default_value') == 1) {
@@ -610,11 +625,6 @@ if ($page == 'overview') {
 					$letsencrypt = '0';
 				}
 
-				if ($aliasdomain != 0 && $letsencrypt != 0)
-				{
-					standard_error('letsencryptdoesnotworkwithaliasdomains');
-				}
-
 				// We can't enable let's encrypt for wildcard - domains
 				if ($iswildcarddomain == '1' && $letsencrypt == '1') {
 				    standard_error('nowildcardwithletsencrypt');
@@ -677,6 +687,17 @@ if ($page == 'overview') {
 							"id" => $id
 						);
 						Database::pexecute($stmt, $params);
+
+						if ($result['aliasdomain'] != $aliasdomain) {
+							// trigger when domain id for alias destination has changed: both for old and new destination
+							triggerLetsEncryptCSRForAliasDestinationDomain($result['aliasdomain'], $log);
+							triggerLetsEncryptCSRForAliasDestinationDomain($aliasdomain, $log);
+						} else
+							if ($result['wwwserveralias'] != $wwwserveralias || $result['letsencrypt'] != $letsencrypt) {
+								// or when wwwserveralias or letsencrypt was changed
+								triggerLetsEncryptCSRForAliasDestinationDomain($aliasdomain, $log);
+							}
+
 						inserttask('1');
 
 						// Using nameserver, insert a task which rebuilds the server config
@@ -711,7 +732,7 @@ if ($page == 'overview') {
 					$domains .= makeoption($idna_convert->decode($row_domain['domain']), $row_domain['id'], $result['aliasdomain']);
 				}
 
-				if (preg_match('/^https?\:\/\//', $result['documentroot']) && validateUrl($idna_convert->encode($result['documentroot']))) {
+				if (preg_match('/^https?\:\/\//', $result['documentroot']) && validateUrl($result['documentroot'])) {
 					if (Settings::Get('panel.pathedit') == 'Dropdown') {
 						$urlvalue = $result['documentroot'];
 						$pathSelect = makePathfield($userinfo['documentroot'], $userinfo['guid'], $userinfo['guid']);
@@ -904,4 +925,7 @@ if ($page == 'overview') {
 
 		eval("echo \"" . getTemplate("domains/domain_ssleditor") . "\";");
 	}
+} elseif ($page == 'domaindnseditor' && $userinfo['dnsenabled'] == '1' && Settings::Get('system.dnsenabled') == '1') {
+
+	require_once __DIR__.'/dns_editor.php';
 }

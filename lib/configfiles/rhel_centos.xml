@@ -40,15 +40,13 @@
 							</visibility>
 							<content><![CDATA[mkdir -p {{settings.system.deactivateddocroot}}]]></content>
 						</command>
-						<command><![CDATA[a2dismod userdir]]></command>
-						<command><![CDATA[a2enmod headers]]></command>
 					</commands>
 				</general>
 				<!-- HTTP Apache -->
 				<daemon name="apache" version="2.4" title="Apache 2.4"
 					default="true">
 					<include>//service[@type='http']/general/commands</include>
-					<file name="/etc/httpd/conf.d/acme.conf">
+					<file name="{{settings.system.letsencryptacmeconf}}">
 						<visibility mode="true">{{settings.system.leenabled}}
 						</visibility>
 						<content><![CDATA[

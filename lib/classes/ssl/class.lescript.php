@@ -29,7 +29,8 @@
 class lescript
 {
 
-	public $license = 'https://letsencrypt.org/documents/LE-SA-v1.0.1-July-27-2015.pdf';
+	// https://letsencrypt.org/repository/
+	public $license;
 
 	private $logger;
 
@@ -37,9 +38,12 @@ class lescript
 
 	private $accountKey;
 
-	public function __construct($logger)
+	private $version;
+
+	public function __construct($logger, $version = '1')
 	{
 		$this->logger = $logger;
+		$this->version = $version;
 		if (Settings::Get('system.letsencryptca') == 'production') {
 			$ca = 'https://acme-v01.api.letsencrypt.org';
 		} else {
@@ -49,7 +53,7 @@ class lescript
 		$this->log("Using '$ca' to generate certificate");
 	}
 
-	public function initAccount($certrow)
+	public function initAccount($certrow, $isFroxlorVhost = false)
 	{
 		// Let's see if we have the private accountkey
 		$this->accountKey = $certrow['leprivatekey'];
@@ -62,17 +66,30 @@ class lescript
 			$keys = $this->generateKey();
 			// Only store the accountkey in production, in staging always generate a new key
 			if (Settings::Get('system.letsencryptca') == 'production') {
-				$upd_stmt = Database::prepare("
-                    UPDATE `" . TABLE_PANEL_CUSTOMERS . "` SET `lepublickey` = :public, `leprivatekey` = :private WHERE `customerid` = :customerid;
-                ");
-				Database::pexecute($upd_stmt, array(
-					'public' => $keys['public'],
-					'private' => $keys['private'],
-					'customerid' => $certrow['customerid']
-				));
+				if ($isFroxlorVhost) {
+					Settings::Set('system.lepublickey', $keys['public']);
+					Settings::Set('system.leprivatekey', $keys['private']);
+				} else {
+					$upd_stmt = Database::prepare("UPDATE `" . TABLE_PANEL_CUSTOMERS . "` SET `lepublickey` = :public, `leprivatekey` = :private " . "WHERE `customerid` = :customerid;");
+					Database::pexecute($upd_stmt, array(
+						'public' => $keys['public'],
+						'private' => $keys['private'],
+						'customerid' => $certrow['customerid']
+					));
+				}
 			}
 			$this->accountKey = $keys['private'];
-			$this->postNewReg();
+
+			$response = $this->postNewReg();
+			if ($this->client->getLastCode() != 201) {
+				throw new \RuntimeException("Account not initialized, probably due to rate limiting. Whole response: " . json_encode($response));
+			}
+			$this->license = $this->client->getAgreementURL();
+
+			// Terms of Servce are optional according to ACME specs; if no ToS are presented, no need to update registration
+			if (!empty($this->license)) {
+				$this->postRegAgreement(parse_url($this->client->getLastLocation(), PHP_URL_PATH));
+			}
 			$this->log('New account certificate registered');
 		} else {
 
@@ -80,10 +97,20 @@ class lescript
 		}
 	}
 
+	/**
+	 *
+	 * @param array $domains
+	 * @param string $domainkey
+	 * @param string $csr
+	 *        	optional, same behavior as $reuseCsr from the original class, but we're passing the content of the csr already
+	 *
+	 * @throws \RuntimeException
+	 * @return string[]
+	 */
 	public function signDomains(array $domains, $domainkey = null, $csr = null)
 	{
 		if (! $this->accountKey) {
-			throw new \RuntimeException("Account not initiated");
+			throw new \RuntimeException("Account not initialized");
 		}
 
 		$this->log('Starting certificate generation process for domains');
@@ -124,8 +151,10 @@ class lescript
 			$challenge = array_reduce($response['challenges'], function ($v, $w) {
 				return $v ? $v : ($w['type'] == 'http-01' ? $w : false);
 			});
-			if (! $challenge)
+
+			if (! $challenge) {
 				throw new RuntimeException("HTTP Challenge for $domain is not available. Whole response: " . json_encode($response));
+			}
 
 			$this->log("Got challenge token for $domain");
 			$location = $this->client->getLastLocation();
@@ -145,8 +174,7 @@ class lescript
 				"e" => Base64UrlSafeEncoder::encode($accountKeyDetails["rsa"]["e"]),
 				"kty" => "RSA",
 				"n" => Base64UrlSafeEncoder::encode($accountKeyDetails["rsa"]["n"])
-			)
-			;
+			);
 			$payload = $challenge['token'] . '.' . Base64UrlSafeEncoder::encode(hash('sha256', json_encode($header), true));
 
 			file_put_contents($tokenPath, $payload);
@@ -160,7 +188,9 @@ class lescript
 			$this->log("Token for $domain saved at $tokenPath and should be available at $uri");
 
 			// simple self check
-			if ($payload !== trim(@file_get_contents($uri))) {
+			$selfcheckContextOptions = array('http' => array('header' => "User Agent: Froxlor/".$this->version));
+			$selfcheckContext = stream_context_create($selfcheckContextOptions);
+			if ($payload !== trim(@file_get_contents($uri, false, $selfcheckContext))) {
 				$errmsg = json_encode(error_get_last());
 				if ($errmsg != "null") {
 					$errmsg = "; PHP error: " . $errmsg;
@@ -168,7 +198,7 @@ class lescript
 					$errmsg = "";
 				}
 				@unlink($tokenPath);
-				throw new \RuntimeException("Please check $uri - token not available" . $errmsg);
+				$this->logger->logAction(CRON_ACTION, LOG_ERR, "letsencrypt Please check $uri - token not available" . $errmsg);
 			}
 
 			$this->log("Sending request to challenge");
@@ -218,7 +248,7 @@ class lescript
 
 		$this->client->getLastLinks();
 
-		if (empty($csrfile) || Settings::Get('system.letsencryptreuseold') == 0) {
+		if (empty($csr)) {
 			$csr = $this->generateCSR($privateDomainKey, $domains);
 		}
 
@@ -291,6 +321,16 @@ class lescript
 
 		return $this->signedRequest('/acme/new-reg', array(
 			'resource' => 'new-reg',
+			'agreement' => $this->license
+		));
+	}
+
+	private function postRegAgreement($uri)
+	{
+		$this->log('Accepting agreement at URL: ' . $this->license);
+
+		return $this->signedRequest($uri, array(
+			'resource' => 'reg',
 			'agreement' => $this->license
 		));
 	}
@@ -496,6 +536,13 @@ class Client
 		preg_match_all('~Link: <(.+)>;rel="up"~', $this->lastHeader, $matches);
 		return $matches[1];
 	}
+
+	public function getAgreementURL()
+	{
+		preg_match_all('~Link: <(.+)>;rel="terms-of-service"~', $this->lastHeader, $matches);
+		return $matches[1][0];
+	}
+
 }
 
 class Base64UrlSafeEncoder

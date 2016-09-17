@@ -245,6 +245,17 @@ if ($page == 'domains' || $page == 'overview') {
 					'domainid' => $id
 				));
 
+				// remove possible existing DNS entries
+				$del_stmt = Database::prepare("
+					DELETE FROM `" . TABLE_DOMAIN_DNS . "`
+					WHERE `domain_id` = :domainid
+				");
+				Database::pexecute($del_stmt, array(
+					'domainid' => $id
+				));
+
+				triggerLetsEncryptCSRForAliasDestinationDomain($result['aliasdomain'], $log);
+
 				$log->logAction(ADM_ACTION, LOG_INFO, "deleted domain/subdomains (#" . $result['id'] . ")");
 				updateCounters();
 				inserttask('1');
@@ -280,10 +291,23 @@ if ($page == 'domains' || $page == 'overview') {
 					standard_error('admin_domain_emailsystemhostname');
 				}
 
+				if (strpos($_POST['domain'], '--') !== false) {
+					standard_error('domain_nopunycode');
+				}
+
 				$domain = $idna_convert->encode(preg_replace(array(
 					'/\:(\d)+$/',
 					'/^https?\:\/\//'
 				), '', validate($_POST['domain'], 'domain')));
+
+				// Check whether domain validation is enabled and if, validate the domain
+				if (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
+					standard_error(array(
+						'stringiswrong',
+						'mydomain'
+					));
+				}
+
 				$subcanemaildomain = intval($_POST['subcanemaildomain']);
 
 				$isemaildomain = 0;
@@ -678,19 +702,9 @@ if ($page == 'domains' || $page == 'overview') {
 					$issubof = '0';
 				}
 
-				if ($aliasdomain != 0 && $letsencrypt != 0) {
-					standard_error('letsencryptdoesnotworkwithaliasdomains');
-				}
-
 				if ($domain == '') {
 					standard_error(array(
 						'stringisempty',
-						'mydomain'
-					));
-				} // Check whether domain validation is enabled and if, validate the domain
-elseif (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
-					standard_error(array(
-						'stringiswrong',
 						'mydomain'
 					));
 				} elseif ($documentroot == '') {
@@ -849,6 +863,9 @@ elseif (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
 							Database::pexecute($ins_stmt, $ins_data);
 						}
 					}
+
+					triggerLetsEncryptCSRForAliasDestinationDomain($aliasdomain, $log);
+
 					$log->logAction(ADM_ACTION, LOG_INFO, "added domain '" . $domain . "'");
 					inserttask('1');
 
@@ -1484,10 +1501,6 @@ elseif (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
 					$issubof = '0';
 				}
 
-				if ($aliasdomain != 0 && $letsencrypt != 0) {
-					standard_error('letsencryptdoesnotworkwithaliasdomains');
-				}
-
 				if ($serveraliasoption != '1' && $serveraliasoption != '2') {
 					$serveraliasoption = '0';
 				}
@@ -1814,6 +1827,15 @@ elseif (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
 						}
 					}
 				}
+				if ($result['aliasdomain'] != $aliasdomain) {
+					// trigger when domain id for alias destination has changed: both for old and new destination
+					triggerLetsEncryptCSRForAliasDestinationDomain($result['aliasdomain'], $log);
+					triggerLetsEncryptCSRForAliasDestinationDomain($aliasdomain, $log);
+				} else
+					if ($result['wwwserveralias'] != $wwwserveralias || $result['letsencrypt'] != $letsencrypt) {
+						// or when wwwserveralias or letsencrypt was changed
+						triggerLetsEncryptCSRForAliasDestinationDomain($aliasdomain, $log);
+					}
 
 				$log->logAction(ADM_ACTION, LOG_INFO, "edited domain #" . $id);
 				redirectTo($filename, array(
@@ -2073,6 +2095,9 @@ elseif (Settings::Get('system.validate_domain') && ! validateDomain($domain)) {
 			eval("echo \"" . getTemplate("domains/domains_import") . "\";");
 		}
 	}
+} elseif ($page == 'domaindnseditor' && Settings::Get('system.dnsenabled') == '1') {
+
+	require_once __DIR__.'/dns_editor.php';
 }
 
 function formatDomainEntry(&$row, &$idna_convert)

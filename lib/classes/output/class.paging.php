@@ -319,6 +319,8 @@ class paging {
 				$condition.= $searchfield . " ".$oper." " . Database::quote($searchtext);
 			} else {
 				$searchtext = str_replace('*', '%', $this->searchtext);
+				// append wildcards if user did not enter any
+				if (strpos($searchtext,'%') === false) $searchtext='%'.$searchtext.'%';
 				$condition.= $searchfield . " LIKE " . Database::quote($searchtext);
 			}
 			
@@ -399,7 +401,7 @@ class paging {
 		}
 
 		$breakorws = ($break ? '<br />' : '&nbsp;');
-		foreach (array('asc' => $lng['panel']['ascending'], 'desc' => $lng['panel']['decending']) as $sortordertype => $sortorderdescription) {
+		foreach (array('asc' => $lng['panel']['ascending'], 'desc' => $lng['panel']['descending']) as $sortordertype => $sortorderdescription) {
 			$orderoptions.= makeoption($sortorderdescription, $sortordertype, $this->sortorder, true, true);
 		}
 
